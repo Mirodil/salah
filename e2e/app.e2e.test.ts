@@ -24,8 +24,10 @@ import {
 let browser: Browser;
 let dev: ViteDevServer;
 let prod: PreviewServer;
+let pages: PreviewServer;
 let base = '';
 let prodBase = '';
+let pagesBase = '';
 
 const rnd = () => 5300 + Math.floor(Math.random() * 600);
 const DAY = { year: 2026, month: 11, day: 21 };
@@ -51,6 +53,11 @@ beforeAll(async () => {
   prod = await preview({ build: { outDir: 'dist-e2e' }, preview: { port: rnd() + 700, strictPort: false }, logLevel: 'silent' });
   prodBase = prod.resolvedUrls!.local[0].replace(/\/$/, '');
 
+  // The same app built for GitHub Pages: served from /salah/ instead of the root.
+  await build({ logLevel: 'silent', base: '/salah/', build: { outDir: 'dist-e2e-base', emptyOutDir: true } });
+  pages = await preview({ base: '/salah/', build: { outDir: 'dist-e2e-base' }, preview: { port: rnd() + 1300, strictPort: false }, logLevel: 'silent' });
+  pagesBase = pages.resolvedUrls!.local[0].replace(/\/$/, ''); // ends with /salah
+
   browser = await launch();
 });
 
@@ -58,6 +65,7 @@ afterAll(async () => {
   await browser?.close();
   await dev?.close();
   await new Promise<void>((r) => (prod ? prod.httpServer.close(() => r()) : r()));
+  await new Promise<void>((r) => (pages ? pages.httpServer.close(() => r()) : r()));
 });
 
 // -----------------------------------------------------------------------------------------------------------------
@@ -658,28 +666,120 @@ describe('installable PWA (production build)', () => {
 
 // -----------------------------------------------------------------------------------------------------------------
 describe('location refresh and elevation', () => {
-  it('refresh location updates position and falls back to the lookup when the device gives no altitude', async () => {
+  const MAKKAH = { lat: 21.4225, lng: 39.8262, altitude: null, altitudeAccuracy: null }; // no device altitude
+
+  async function refreshInMakkah(initial: 'elevation' | 'offline') {
+    const lookups: string[] = [];
+    let answer = initial;
     const app = await openApp(browser, {
       base,
       t: '2026-11-21T10:00:00Z',
       seed: seedState(),
-      geo: { lat: 21.4225, lng: 39.8262, altitude: null, altitudeAccuracy: null }, // Makkah, no altitude
+      geo: MAKKAH,
+      // the elevation service is stubbed so the test is deterministic and works offline
+      onPage: async (p) => {
+        await p.setRequestInterception(true);
+        p.on('request', (req) => {
+          if (!req.url().startsWith('https://api.open-meteo.com/')) return void req.continue();
+          lookups.push(req.url());
+          if (answer === 'offline') return void req.abort('internetdisconnected');
+          void req.respond({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: '{"elevation":[305]}' });
+        });
+      },
+    });
+    await waitScene(app.page, 'Main');
+    await clickMainButton(app.page, 'btnGear');
+    await clickText(app.page, 'Refresh location');
+    await app.page.waitForFunction(() => Math.abs(JSON.parse(localStorage.getItem('salah.state.v1')!).position.lat - 21.4225) < 0.01, { timeout: 20000 });
+    await sleep(300);
+    return { app, lookups, setAnswer: (a: 'elevation' | 'offline') => (answer = a) };
+  }
+
+  it('moves to the new place, looks up elevation with coordinates rounded to three decimals, and caches it', async () => {
+    const { app, lookups } = await refreshInMakkah('elevation');
+    const st = await storage(app.page);
+    expect(st.position.lat).toBeCloseTo(21.4225, 3);
+    expect(st.elevation).toEqual({ m: 305, source: 'lookup' });
+    expect(st.elevationCache).toEqual({ '21.423,39.826': 305 });
+    expect(lookups).toEqual(['https://api.open-meteo.com/v1/elevation?latitude=21.423&longitude=39.826']); // nothing more precise leaves the device
+    expect(await main(app.page, `s.sky.lat`)).toBeCloseTo(21.4225, 3); // the sky now follows the new place
+    expect(app.errors.filter((e) => !e.includes('ERR_INTERNET_DISCONNECTED'))).toEqual([]);
+    await app.close();
+  });
+
+  it('falls back to 0 m when offline, and retries the lookup once back online', async () => {
+    const { app, lookups, setAnswer } = await refreshInMakkah('offline');
+    const st = await storage(app.page);
+    expect(st.position.lat).toBeCloseTo(21.4225, 3);
+    expect(st.elevation).toEqual({ m: 0, source: 'default' });
+    expect(st.elevationCache).toEqual({});
+    expect(lookups.length).toBeGreaterThanOrEqual(1);
+
+    // back online: the app tries again, keeps the position and stores the answer
+    setAnswer('elevation');
+    await app.page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await app.page.waitForFunction(() => JSON.parse(localStorage.getItem('salah.state.v1')!).elevation.source === 'lookup', { timeout: 10000 });
+    const after = await storage(app.page);
+    expect(after.elevation).toEqual({ m: 305, source: 'lookup' });
+    expect(after.position.lat).toBeCloseTo(21.4225, 3);
+    await app.close();
+  });
+});
+
+// -----------------------------------------------------------------------------------------------------------------
+describe('GitHub Pages: served from the /salah/ sub-path', () => {
+  it('stays inside /salah/, has the right manifest and service worker scope, and works offline', async () => {
+    const seed = seedState({}, { notify: { enabled: true, prayers: { fajr: true, sunrise: false, dhuhr: true, asr: true, maghrib: true, isha: true, qiyam: false } } });
+    const requests: { url: string; status: number }[] = [];
+    const app = await openApp(browser, {
+      base: pagesBase,
+      t: '2026-11-21T11:47:30Z', // 30 seconds after Dhuhr: a notification is due at once
+      seed,
+      notifications: 'granted',
+      onPage: (p) => p.on('response', (r) => requests.push({ url: r.url(), status: r.status() })),
     });
     const { page } = app;
     await waitScene(page, 'Main');
-    await clickMainButton(page, 'btnGear');
-    await clickText(page, 'Refresh location');
-    await page.waitForFunction(() => JSON.parse(localStorage.getItem('salah.state.v1')!).position.lat > 20, { timeout: 15000 });
-    const st = await storage(page);
-    expect(st.position.lat).toBeCloseTo(21.4225, 3);
-    // either the lookup answered (about 300 m in Makkah) or we were offline and fell back to 0 m
-    expect(['lookup', 'default']).toContain(st.elevation.source);
-    if (st.elevation.source === 'lookup') {
-      expect(st.elevation.m).toBeGreaterThan(100);
-      expect(Object.keys(st.elevationCache)).toContain('21.423,39.826'); // coordinates rounded to three decimals
+    await sleep(1500);
+
+    const origin = new URL(pagesBase).origin;
+    const own = requests.filter((r) => r.url.startsWith(origin));
+    expect(own.length).toBeGreaterThan(5);
+    expect(own.filter((r) => !new URL(r.url).pathname.startsWith('/salah/')), 'requests outside /salah/').toEqual([]);
+    expect(own.filter((r) => r.status >= 400), 'failed requests').toEqual([]);
+    expect(await rowTimes(page)).toEqual(expectedRows());
+
+    // manifest: installable under the sub-path
+    const manifestHref = await page.evaluate(() => document.querySelector('link[rel="manifest"]')?.getAttribute('href'));
+    expect(manifestHref).toBe('/salah/manifest.webmanifest');
+    const manifest = (await page.evaluate(async (h: string) => (await fetch(h)).json(), manifestHref!)) as any;
+    expect(manifest.start_url).toBe('/salah/');
+    expect(manifest.scope).toBe('/salah/');
+    for (const icon of manifest.icons) {
+      const ok = await page.evaluate(async (u: string) => (await fetch(u)).ok, new URL(icon.src, `${origin}/salah/manifest.webmanifest`).pathname);
+      expect(ok, icon.src).toBe(true);
     }
-    await sleep(500);
-    expect(await main(page, `s.sky.lat`)).toBeCloseTo(21.4225, 3); // the sky now follows the new place
+    expect(await page.evaluate(() => document.querySelector('link[rel="icon"]')?.getAttribute('href'))).toBe('/salah/icons/icon.svg');
+
+    // service worker scope covers the app but nothing outside it
+    const scope = await page.evaluate(() => navigator.serviceWorker.ready.then((r) => r.scope));
+    expect(scope).toBe(`${origin}/salah/`);
+
+    // the notification that was due carries sub-path-safe URLs
+    const notes = (await page.evaluate(() => (window as any).__notes)) as any[];
+    expect(notes).toHaveLength(1);
+    expect(notes[0].options.icon).toBe('/salah/icons/icon-192.png');
+    expect(notes[0].options.data.url).toBe('/salah/');
+
+    // offline start
+    await sleep(2000);
+    await page.reload({ waitUntil: 'load' });
+    await waitScene(page, 'Main');
+    await page.setOfflineMode(true);
+    await page.reload({ waitUntil: 'load' });
+    await waitScene(page, 'Main');
+    expect(await rowTimes(page)).toEqual(expectedRows());
+    expect(app.errors).toEqual([]);
     await app.close();
   });
 });

@@ -2,6 +2,9 @@ import { findDue, nextNotifyTime, type NotifyPrefs } from '../core/notify';
 import { formatTime } from '../core/format';
 import { PRAYER_LABEL, type PrayerKey, type Row } from '../core/schedule';
 
+/** The app may be served from a sub-path (GitHub Pages), so never hard-code a leading slash. */
+const BASE = import.meta.env.BASE_URL;
+
 export type Permission = 'granted' | 'denied' | 'default' | 'unsupported';
 
 export function notificationPermission(): Permission {
@@ -23,9 +26,9 @@ export async function showSalahNotification(key: PrayerKey, time: Date, hour12: 
   const options: NotificationOptions = {
     body: `It is time for ${label}, ${formatTime(time, hour12)}`,
     tag: key,
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
-    data: { url: '/' },
+    icon: `${BASE}icons/icon-192.png`,
+    badge: `${BASE}icons/icon-192.png`,
+    data: { url: BASE },
   };
   // Mobile browsers only allow notifications through a service worker registration.
   try {

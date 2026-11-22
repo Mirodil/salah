@@ -64,6 +64,8 @@ export interface OpenOpts {
   /** pretend to be an iOS-style device that needs a tap to allow motion sensors */
   motionPermission?: boolean;
   mobile?: boolean;
+  /** Called with the page before it navigates, e.g. to attach listeners. */
+  onPage?: (page: Page) => void | Promise<void>;
 }
 
 export interface App {
@@ -132,6 +134,7 @@ export async function openApp(browser: Browser, o: OpenOpts): Promise<App> {
     if (m.type() === 'error') errors.push(m.text());
   });
 
+  await o.onPage?.(page);
   const qs = new URLSearchParams();
   if (o.t) qs.set('t', o.t);
   if (o.speed) qs.set('speed', String(o.speed));

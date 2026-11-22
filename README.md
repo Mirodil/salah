@@ -28,6 +28,17 @@ The e2e tests use the Chrome you already have (set `CHROME_PATH` if it is not in
 
 Salah times are checked against the independent [`adhan`](https://github.com/batoulapps/adhan-js) library (dev dependency only) to within one minute, across 13 place/method/Asr combinations. Elevation, Qiyam, polar and high-latitude cases are tested directly.
 
+## Deploy (GitHub Pages)
+
+Pushes to `main` build and publish the site through `.github/workflows/deploy.yml`, to **https://mirodil.github.io/salah/**.
+
+One-time setup: in the repo go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**. Nothing else to configure; the first run after that publishes the site.
+
+- A project site lives under `/salah/`, so the workflow builds with `BASE_PATH=/salah/`. For a custom domain, or a `<user>.github.io` repository, set `BASE_PATH` to `/`.
+- Pages is served over HTTPS, which location, the service worker and notifications all need.
+- The deploy runs the unit tests and the build. `.github/workflows/ci.yml` runs the full check, including the browser tests, on every push and pull request.
+- To test the Pages build locally: `BASE_PATH=/salah/ npm run build && BASE_PATH=/salah/ npm run preview`, then open http://localhost:4173/salah/.
+
 ## Debugging time
 
 Add `?t=2026-06-21T12:00:00Z` to start the app at a given instant, and `&speed=600` to run 600 virtual seconds per real second. Watch a whole day of sky, list highlighting and notifications in a few minutes.
